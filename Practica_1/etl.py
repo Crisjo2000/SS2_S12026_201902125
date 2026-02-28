@@ -98,7 +98,6 @@ def transformar_vuelos(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 #Limpieza básica
 
-
     df["origin_airport"]      = normalizar_aeropuerto(df["origin_airport"])
     df["destination_airport"] = normalizar_aeropuerto(df["destination_airport"])
     df["airline_code"]        = df["airline_code"].str.strip().str.upper()
@@ -110,12 +109,10 @@ def transformar_vuelos(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 #Fechas
 
-
     df["departure_datetime"] = parsear_datatime(df["departure_datetime"])
     df["arrival_datetime"]   = parsear_datatime(df["arrival_datetime"])
 
 #Nulos Numéricos
-
 
     df["delay_min"]    = pd.to_numeric(df["delay_min"],    errors="coerce").fillna(0)
     df["duration_min"] = pd.to_numeric(df["duration_min"], errors="coerce")
@@ -211,7 +208,7 @@ def transformar_vuelos(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         "FACT_VUELO":     fact_vuelo,
     }
 
-def transformar_pasajeros(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def transformar_pasajeros(df: pd.DataFrame, flight_tables: dict) -> dict[str, pd.DataFrame]:
     log.info("FASE 2: Trasformación (pasajeros)")
     df = df.copy()
 
@@ -230,7 +227,6 @@ def transformar_pasajeros(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     df["ticket_price"]         = pd.to_numeric(df["ticket_price"],         errors="coerce")
     df["ticket_price_usd_est"] = pd.to_numeric(df["ticket_price_usd_est"], errors="coerce")
 
-
     mediana_edad = df["passenger_age"].median()
     df["passenger_age"] = df["passenger_age"].fillna(mediana_edad).astype(int)
 
@@ -238,7 +234,6 @@ def transformar_pasajeros(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     log.info(f"  Géneros normalizados: {df['passenger_gender'].value_counts().to_dict()}")
 
 #dimensional_pasajero
-
     dim_pasajero = df[[
         "passenger_id", "passenger_gender", "passenger_age", "passenger_nationality",
     ]].copy()
@@ -247,21 +242,29 @@ def transformar_pasajeros(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 #hecho_reserva
 
+    fact_vuelo = flight_tables["FACT_VUELO"]
+    dim_fecha  = flight_tables["DIM_FECHA"]
+
+    id_aerolinea_series  = fact_vuelo["id_aerolinea"].reset_index(drop=True)
+    fecha_map            = dim_fecha.set_index("fecha")["id_fecha"]
+    id_fecha_reserva_series = df["booking_datetime"].dt.normalize().map(fecha_map)
+
     fact_reserva = df[[
         "passenger_id", "booking_datetime", "sales_channel",
         "payment_method", "ticket_price", "currency",
         "ticket_price_usd_est", "bags_total", "bags_checked",
-    ]].copy()
+    ]].copy().reset_index(drop=True)
+
     fact_reserva.columns = [
         "id_pasajero", "fecha_reserva", "canal_venta",
         "metodo_pago", "precio_ticket", "moneda",
         "precio_usd", "total_maletas", "maletas_documentadas",
     ]
 
-# La unión con FACT_VUELO se hace por posición (mismos 10 000 registros, mismo orden)
-
-    fact_reserva.insert(0, "id_reserva", range(1, len(fact_reserva) + 1))
-    fact_reserva.insert(1, "id_vuelo",   range(1, len(fact_reserva) + 1))
+    fact_reserva.insert(0, "id_reserva",        range(1, len(fact_reserva) + 1))
+    fact_reserva.insert(1, "id_vuelo",           range(1, len(fact_reserva) + 1))
+    fact_reserva.insert(2, "id_aerolinea",       id_aerolinea_series.values)
+    fact_reserva.insert(3, "id_fecha_reserva",   id_fecha_reserva_series.values)
 
     log.info(f"  FACT_RESERVA → {len(fact_reserva)} registros")
 
@@ -314,21 +317,22 @@ def main():
 
     # TRANSFORMACIÓN
     flight_tables    = transformar_vuelos(df_flights)
-    passenger_tables = transformar_pasajeros(df_passengers)
+    passenger_tables = transformar_pasajeros(df_passengers, flight_tables)
     all_tables = {**flight_tables, **passenger_tables}
 
     log.info("\n── Vista previa de tablas transformadas ──")
     for name, df in all_tables.items():
         log.info(f"  {name:20s}: {df.shape[0]:,} filas × {df.shape[1]} columnas")
 
-    # Exportar CSVs limpios (útil para revisión / importación manual)
+# Exportar CSVs limpios
     out_dir = BASE_DIR / "csvs_limpios"
     out_dir.mkdir(exist_ok=True)
     for name, df in all_tables.items():
         df.to_csv(out_dir / f"{name}.csv", index=False, encoding="utf-8-sig")
     log.info(f"\nCSVs limpios exportados en: {out_dir}")
 
-    # CARGA A SQL SERVER
+#Carga a SQL Server
+
     try:
         engine = create_engine(ENGINE_URL, fast_executemany=True)
         with engine.connect() as conn:

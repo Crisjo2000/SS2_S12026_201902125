@@ -1,0 +1,5 @@
+﻿id_estado,codigo,descripcion
+1,ON_TIME,A tiempo
+2,DELAYED,Retrasado
+3,CANCELLED,Cancelado
+4,DIVERTED,Desviado
